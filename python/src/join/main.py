@@ -1,15 +1,13 @@
 import os
 import logging
+from collections import defaultdict
 
-from common import middleware, message_protocol, fruit_item
+from common import middleware, message_protocol, fruit_accumulator
 
 MOM_HOST = os.environ["MOM_HOST"]
 INPUT_QUEUE = os.environ["INPUT_QUEUE"]
 OUTPUT_QUEUE = os.environ["OUTPUT_QUEUE"]
-SUM_AMOUNT = int(os.environ["SUM_AMOUNT"])
-SUM_PREFIX = os.environ["SUM_PREFIX"]
 AGGREGATION_AMOUNT = int(os.environ["AGGREGATION_AMOUNT"])
-AGGREGATION_PREFIX = os.environ["AGGREGATION_PREFIX"]
 TOP_SIZE = int(os.environ["TOP_SIZE"])
 
 
@@ -22,15 +20,39 @@ class JoinFilter:
         self.output_queue = middleware.MessageMiddlewareQueueRabbitMQ(
             MOM_HOST, OUTPUT_QUEUE
         )
+        self.accumulators = defaultdict(fruit_accumulator.FruitAccumulator)
+        self.partial_tops_received = defaultdict(int)
 
-    def process_messsage(self, message, ack, nack):
-        logging.info("Received top")
-        fruit_top = message_protocol.internal.deserialize(message)
-        self.output_queue.send(message_protocol.internal.serialize(fruit_top))
+    def _process_partial_top(self, client_id, records):
+        self.accumulators[client_id].add(records)
+        self.partial_tops_received[client_id] += 1
+        logging.info(
+            f"Received partial top "
+            f"{self.partial_tops_received[client_id]}/{AGGREGATION_AMOUNT} "
+            f"of client {client_id}"
+        )
+
+        if self.partial_tops_received[client_id] < AGGREGATION_AMOUNT:
+            return
+
+        fruit_top = self.accumulators.pop(client_id).top(TOP_SIZE)
+        del self.partial_tops_received[client_id]
+        self.output_queue.send(
+            message_protocol.internal.serialize(
+                message_protocol.internal.TOP, client_id, fruit_top
+            )
+        )
+
+    def process_message(self, message, ack, nack):
+        msg_type, client_id, payload = message_protocol.internal.deserialize(message)
+        if msg_type == message_protocol.internal.TOP:
+            self._process_partial_top(client_id, payload)
+        else:
+            logging.error(f"Unknown message type {msg_type}")
         ack()
 
     def start(self):
-        self.input_queue.start_consuming(self.process_messsage)
+        self.input_queue.start_consuming(self.process_message)
 
 
 def main():
