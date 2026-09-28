@@ -7,6 +7,7 @@ from common import middleware, message_protocol, fruit_accumulator
 ID = int(os.environ["ID"])
 MOM_HOST = os.environ["MOM_HOST"]
 OUTPUT_QUEUE = os.environ["OUTPUT_QUEUE"]
+SUM_AMOUNT = int(os.environ["SUM_AMOUNT"])
 AGGREGATION_PREFIX = os.environ["AGGREGATION_PREFIX"]
 TOP_SIZE = int(os.environ["TOP_SIZE"])
 
@@ -21,14 +22,27 @@ class AggregationFilter:
             MOM_HOST, OUTPUT_QUEUE
         )
         self.accumulators = defaultdict(fruit_accumulator.FruitAccumulator)
+        self.ends_of_ingestion_received = defaultdict(int)
 
     def _process_data(self, client_id, records):
         self.accumulators[client_id].add(records)
 
     def _process_eof(self, client_id):
+        self.ends_of_ingestion_received[client_id] += 1
+        logging.info(
+            f"Received end of ingestion "
+            f"{self.ends_of_ingestion_received[client_id]}/{SUM_AMOUNT} "
+            f"of client {client_id}"
+        )
+
+        if self.ends_of_ingestion_received[client_id] < SUM_AMOUNT:
+            return
+
         accumulator = self.accumulators.pop(
             client_id, fruit_accumulator.FruitAccumulator()
         )
+        del self.ends_of_ingestion_received[client_id]
+
         fruit_top = accumulator.top(TOP_SIZE)
         logging.info(f"Sending partial top of client {client_id}")
         self.output_queue.send(

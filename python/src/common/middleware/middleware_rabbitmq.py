@@ -34,16 +34,22 @@ def _raise_domain_error(error):
 
 class _RabbitMQMiddleware(MessageMiddleware):
     """Contiene la lógica común a los dos modelos que son el ciclo de vida de
-    la conexión y el canal. Cada instancia es dueña de una conexión y un canal
-    propios.
+    la conexión y el canal. Por defecto cada instancia es dueña de una conexión
+    y un canal propios, pero puede reusar los de otra instancia.
 
     Las subclases setean self._queue_name con la cola de la que consumen.
     """
 
-    def __init__(self, host):
+    def __init__(self, host, shared_with=None):
         # Arrancan en None para que close() funcione aunque falle la conexión.
         self._connection = None
         self._channel = None
+        self._owns_connection = shared_with is None
+
+        if not self._owns_connection:
+            self._connection = shared_with._connection
+            self._channel = shared_with._channel
+            return
 
         try:
             self._connection = pika.BlockingConnection(
@@ -52,7 +58,10 @@ class _RabbitMQMiddleware(MessageMiddleware):
         except _TRANSPORT_ERRORS as error:
             _raise_domain_error(error)
 
-    def start_consuming(self, on_message_callback):
+    def consume(self, on_message_callback):
+        """Registra el consumidor sin bloquear, para que un proceso pueda
+        atender más de una fuente desde el mismo canal."""
+
         # pika entrega los mensajes con su propia firma de 4 args, mientras que
         # la interfaz espera 3. dispatch funciona como un adaptador entre las 2
         def _dispatch(channel, method, props, body):
@@ -66,7 +75,15 @@ class _RabbitMQMiddleware(MessageMiddleware):
             self._channel.basic_consume(queue=self._queue_name,
                                         on_message_callback=_dispatch,
                                         auto_ack=False)
-            # Bloquea hasta que stop_consuming() cancele el consumo.
+        except _TRANSPORT_ERRORS as error:
+            _raise_domain_error(error)
+
+    def start_consuming(self, on_message_callback):
+        self.consume(on_message_callback)
+
+        try:
+            # Bloquea hasta que stop_consuming() cancele el consumo, y atiende
+            # a todos los consumidores registrados en este canal.
             self._channel.start_consuming()
         except _TRANSPORT_ERRORS as error:
             _raise_domain_error(error)
@@ -78,6 +95,9 @@ class _RabbitMQMiddleware(MessageMiddleware):
             _raise_domain_error(error)
 
     def close(self):
+        if not self._owns_connection:
+            return
+
         try:
             try:
                 if self._channel is not None and self._channel.is_open:
@@ -94,8 +114,8 @@ class MessageMiddlewareQueueRabbitMQ(_RabbitMQMiddleware, MessageMiddlewareQueue
     """Modelo Productor-Consumidor sobre una work queue, todos los consumidores comparten
     la misma cola, así que cada mensaje lo procesa uno solo de ellos."""
 
-    def __init__(self, host, queue_name):
-        super().__init__(host)
+    def __init__(self, host, queue_name, shared_with=None):
+        super().__init__(host, shared_with)
         self._queue_name = queue_name
 
         try:
@@ -125,8 +145,8 @@ class MessageMiddlewareExchangeRabbitMQ(_RabbitMQMiddleware,
     """Modelo Publisher-Subscriber sobre un exchange, cada suscriptor recibe su propia
     copia de los mensajes de sus routing keys."""
 
-    def __init__(self, host, exchange_name, routing_keys):
-        super().__init__(host)
+    def __init__(self, host, exchange_name, routing_keys, shared_with=None):
+        super().__init__(host, shared_with)
         self._exchange_name = exchange_name
         self._routing_keys = list(routing_keys)
         # La cola del suscriptor se crea al empezar a consumir, así un objeto
@@ -163,9 +183,9 @@ class MessageMiddlewareExchangeRabbitMQ(_RabbitMQMiddleware,
         except _TRANSPORT_ERRORS as error:
             _raise_domain_error(error)
 
-    def start_consuming(self, on_message_callback):
+    def consume(self, on_message_callback):
         self._declare_subscriber_queue()
-        super().start_consuming(on_message_callback)
+        super().consume(on_message_callback)
 
     def send(self, message):
         try:
