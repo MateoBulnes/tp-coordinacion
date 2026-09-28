@@ -1,4 +1,5 @@
 import os
+import zlib
 import logging
 from collections import defaultdict
 
@@ -13,6 +14,11 @@ AGGREGATION_AMOUNT = int(os.environ["AGGREGATION_AMOUNT"])
 AGGREGATION_PREFIX = os.environ["AGGREGATION_PREFIX"]
 
 CONTROL_EXCHANGE_SUFFIX = "control"
+
+
+def _aggregation_for(fruit):
+    """Decide que replica de Aggregation tiene a cargo una fruta."""
+    return zlib.crc32(fruit.encode("utf-8")) % AGGREGATION_AMOUNT
 
 
 class SumFilter:
@@ -59,18 +65,30 @@ class SumFilter:
             )
         )
 
+    def _shard(self, records):
+        """Agrupa las frutas por la replica de Aggregation que las tiene a
+        cargo."""
+        shards = [[] for _ in range(AGGREGATION_AMOUNT)]
+        for record in records:
+            [fruit, _] = record
+            shards[_aggregation_for(fruit)].append(record)
+        return shards
+
     def _finish(self, client_id):
         accumulator = self.accumulators.pop(
             client_id, fruit_accumulator.FruitAccumulator()
         )
-        records = accumulator.items()
-        logging.info(f"Flushing {len(records)} fruits of client {client_id}")
+        shards = self._shard(accumulator.items())
+        logging.info(
+            f"Flushing fruits of client {client_id} "
+            f"in shards {[len(shard) for shard in shards]}"
+        )
 
-        for data_output_exchange in self.data_output_exchanges:
-            if records:
+        for shard, data_output_exchange in zip(shards, self.data_output_exchanges):
+            if shard:
                 data_output_exchange.send(
                     message_protocol.internal.serialize(
-                        message_protocol.internal.DATA, client_id, records
+                        message_protocol.internal.DATA, client_id, shard
                     )
                 )
             data_output_exchange.send(
