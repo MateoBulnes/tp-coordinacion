@@ -1,5 +1,6 @@
 import os
 import zlib
+import signal
 import logging
 from collections import defaultdict
 
@@ -120,11 +121,28 @@ class SumFilter:
         self.control_input.consume(self.process_control_message)
         self.input_queue.start_consuming(self.process_data_message)
 
+    def stop(self):
+        self.input_queue.request_stop()
+
+    def close(self):
+        self.input_queue.close()
+
 
 def main():
     logging.basicConfig(level=logging.INFO)
-    sum_filter = SumFilter()
-    sum_filter.start()
+
+    try:
+        sum_filter = SumFilter()
+        signal.signal(signal.SIGTERM, lambda signum, frame: sum_filter.stop())
+        try:
+            sum_filter.start()
+        finally:
+            sum_filter.close()
+    except middleware.ERRORS as error:
+        logging.error(error)
+        return 1
+
+    logging.info("Shutting down")
     return 0
 
 

@@ -1,4 +1,5 @@
 import os
+import signal
 import logging
 from collections import defaultdict
 
@@ -54,12 +55,29 @@ class JoinFilter:
     def start(self):
         self.input_queue.start_consuming(self.process_message)
 
+    def stop(self):
+        self.input_queue.request_stop()
+
+    def close(self):
+        self.input_queue.close()
+        self.output_queue.close()
+
 
 def main():
     logging.basicConfig(level=logging.INFO)
-    join_filter = JoinFilter()
-    join_filter.start()
 
+    try:
+        join_filter = JoinFilter()
+        signal.signal(signal.SIGTERM, lambda signum, frame: join_filter.stop())
+        try:
+            join_filter.start()
+        finally:
+            join_filter.close()
+    except middleware.ERRORS as error:
+        logging.error(error)
+        return 1
+
+    logging.info("Shutting down")
     return 0
 
 

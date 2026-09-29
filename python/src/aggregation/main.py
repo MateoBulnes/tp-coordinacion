@@ -1,4 +1,5 @@
 import os
+import signal
 import logging
 from collections import defaultdict
 
@@ -64,11 +65,31 @@ class AggregationFilter:
     def start(self):
         self.input_exchange.start_consuming(self.process_message)
 
+    def stop(self):
+        self.input_exchange.request_stop()
+
+    def close(self):
+        self.input_exchange.close()
+        self.output_queue.close()
+
 
 def main():
     logging.basicConfig(level=logging.INFO)
-    aggregation_filter = AggregationFilter()
-    aggregation_filter.start()
+
+    try:
+        aggregation_filter = AggregationFilter()
+        signal.signal(
+            signal.SIGTERM, lambda signum, frame: aggregation_filter.stop()
+        )
+        try:
+            aggregation_filter.start()
+        finally:
+            aggregation_filter.close()
+    except middleware.ERRORS as error:
+        logging.error(error)
+        return 1
+
+    logging.info("Shutting down")
     return 0
 
 

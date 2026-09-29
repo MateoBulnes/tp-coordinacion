@@ -94,6 +94,13 @@ class _RabbitMQMiddleware(MessageMiddleware):
         except _TRANSPORT_ERRORS as error:
             _raise_domain_error(error)
 
+    def request_stop(self):
+        try:
+            self._connection.add_callback_threadsafe(
+                self._channel.stop_consuming)
+        except _TRANSPORT_ERRORS as error:
+            _raise_domain_error(error)
+
     def close(self):
         if not self._owns_connection:
             return
